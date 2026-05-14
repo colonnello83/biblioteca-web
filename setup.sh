@@ -9,14 +9,14 @@ echo ""
 # ── PARAMETRI PERSONALIZZATI ──────────────────
 echo "Inserisci i parametri di configurazione:"
 echo ""
-read -p "IP o host FTP del NAS                              : " FTP_HOST
-read -p "Utente FTP                                         : " FTP_USER
-read -s -p "Password FTP                                       : " FTP_PASS
+read -p "IP o host FTP del NAS                                      : " FTP_HOST
+read -p "Utente FTP                                                  : " FTP_USER
+read -s -p "Password FTP                                               : " FTP_PASS
 echo ""
-read -p "Percorso CSV sul NAS (es. /disk1/Buffalo/libri/libri.csv) : " FTP_PATH
-read -p "IP Arduino Mega2560                                : " ARDUINO_IP
-read -p "Porta TCP Arduino (es. 5000)                       : " ARDUINO_PORT
-read -p "Porta server web (premi Invio per default 3000)    : " SERVER_PORT
+read -p "Percorso file Excel sul NAS (es. /disk1/Buffalo/libri/libri.xlsx) : " FTP_PATH
+read -p "IP Arduino Mega2560                                         : " ARDUINO_IP
+read -p "Porta TCP Arduino (es. 5000)                                : " ARDUINO_PORT
+read -p "Porta server web (premi Invio per default 3000)             : " SERVER_PORT
 SERVER_PORT=${SERVER_PORT:-3000}
 
 echo ""
@@ -40,7 +40,6 @@ echo "[3/6] Creazione struttura progetto..."
 mkdir -p ~/biblioteca-web/public
 cd ~/biblioteca-web
 
-# package.json con type module
 cat > ~/biblioteca-web/package.json << 'PKGEOF'
 {
   "name": "biblioteca-web",
@@ -53,20 +52,18 @@ cat > ~/biblioteca-web/package.json << 'PKGEOF'
 }
 PKGEOF
 
-npm install express csv-parse basic-ftp iconv-lite
+npm install express basic-ftp xlsx
 npm install --save-dev nodemon
 
 # ── SERVER.JS ─────────────────────────────────
 echo "[4/6] Scrittura server.js..."
 cat > ~/biblioteca-web/server.js << SERVEREOF
 import express from "express";
-import fs from "fs";
-import { parse } from "csv-parse/sync";
 import ftp from "basic-ftp";
 import net from "net";
 import path from 'path';
 import { fileURLToPath } from 'url';
-import iconv from "iconv-lite";
+import xlsx from "xlsx";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,28 +84,26 @@ const MEGA_CONFIG = {
   port: ${ARDUINO_PORT}
 };
 
-const LOCAL_CSV = path.join(__dirname, 'libri.csv');
+const LOCAL_XLSX = path.join(__dirname, 'libri.xlsx');
 let libri = [];
 
-async function leggiCSV(percorso) {
+function leggiExcel(percorso) {
   try {
-    const raw = iconv.decode(fs.readFileSync(percorso), "win1252")
-      .replace(/^\uFEFF/, "")
-      .replace(/\r/g, "");
-    const records = parse(raw, {
-      delimiter: ";",
-      skip_empty_lines: true
-    });
-    libri = records.map((riga) => ({
-      autore: riga[0]?.trim() || "",
-      titolo: riga[1]?.trim() || "",
-      editore: riga[2]?.trim() || "",
-      genere: riga[3]?.trim() || "",
-      codice: riga[4]?.trim() || ""
-    })).filter(b => b.autore && b.titolo);
-    console.log("CSV caricato (" + libri.length + " libri)");
+    const workbook = xlsx.readFile(percorso);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const records = xlsx.utils.sheet_to_json(sheet, { header: 1 });
+    libri = records
+      .map(riga => ({
+        autore:  String(riga[0] || "").trim(),
+        titolo:  String(riga[1] || "").trim(),
+        editore: String(riga[2] || "").trim(),
+        genere:  String(riga[3] || "").trim(),
+        codice:  String(riga[4] || "").trim()
+      }))
+      .filter(b => b.autore && b.titolo);
+    console.log("Excel caricato (" + libri.length + " libri)");
   } catch (err) {
-    console.error("Errore lettura CSV:", err);
+    console.error("Errore lettura Excel:", err);
   }
 }
 
@@ -131,7 +126,7 @@ function raggruppaPerGenere() {
   }));
 }
 
-async function scaricaCSV() {
+async function scaricaExcel() {
   const client = new ftp.Client();
   client.ftp.verbose = false;
   try {
@@ -142,9 +137,9 @@ async function scaricaCSV() {
       password: FTP_CONFIG.password,
       secure: FTP_CONFIG.secure
     });
-    await client.downloadTo(LOCAL_CSV, FTP_CONFIG.path);
-    console.log("CSV scaricato");
-    await leggiCSV(LOCAL_CSV);
+    await client.downloadTo(LOCAL_XLSX, FTP_CONFIG.path);
+    console.log("Excel scaricato");
+    leggiExcel(LOCAL_XLSX);
   } catch (err) {
     console.error("Errore FTP:", err);
   } finally {
@@ -186,7 +181,7 @@ app.post("/api/invia", async (req, res) => {
 });
 
 app.post("/api/aggiorna", async (req, res) => {
-  await scaricaCSV();
+  await scaricaExcel();
   res.json({ success: true, libri: libri.length });
 });
 
@@ -202,7 +197,7 @@ app.get("/api/test", async (req, res) => {
 
 app.listen(PORT, HOST, async () => {
   console.log("Server avviato su http://" + HOST + ":" + PORT);
-  await scaricaCSV();
+  await scaricaExcel();
   setInterval(() => {}, 1000);
 });
 SERVEREOF
@@ -227,7 +222,7 @@ cat > ~/biblioteca-web/public/index.html << 'HTMLEOF'
     <div class="buttons">
       <button id="onall">ON ALL</button>
       <button id="offall">OFF</button>
-      <button id="aggiorna">Aggiorna CSV</button>
+      <button id="aggiorna">Aggiorna Elenco</button>
       <button id="btn-generi" class="nav-button">Generi</button>
       <button id="btn-titoli" class="nav-button" style="display:none;">Titoli</button>
     </div>
@@ -336,12 +331,10 @@ CSSEOF
 
 # ── PUBLIC/APP.JS ─────────────────────────────
 cat > ~/biblioteca-web/public/app.js << 'APPEOF'
-const container = document.getElementById("libri-container");
 const searchInput = document.getElementById("search");
 const onAllBtn = document.getElementById("onall");
 const offAllBtn = document.getElementById("offall");
 const aggiornaBtn = document.getElementById("aggiorna");
-const mainContainer = document.getElementById('main-container');
 const libriContainer = document.getElementById('libri-container');
 const generiContainer = document.getElementById('generi-container');
 const btnGeneri = document.getElementById('btn-generi');
@@ -421,9 +414,7 @@ async function inviaCodici(codiciStringa) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ codice: codice })
       });
-      if (response.ok) {
-        successCount++;
-      }
+      if (response.ok) successCount++;
     } catch (error) {
       console.error('Errore di rete durante l\'invio:', error);
     }
@@ -470,7 +461,7 @@ async function aggiornaCSV() {
     const currentView = btnGeneri.style.display !== 'none' ? 'libri' : 'generi';
     fetchAndRender(currentView);
   } catch {
-    alert("Errore durante aggiornamento CSV");
+    alert("Errore durante aggiornamento");
   }
 }
 
